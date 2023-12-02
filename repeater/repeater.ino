@@ -10,33 +10,43 @@
 
 #define MODE_MIC 0
 #define MODE_SPK 1
+
+// Sound recording, analysis and calibration
 #define DATA_SIZE 1024
 #define GAIN_FACTOR 1
+#define DYNAMIC_SOUND_THRESHOLD_MULTIPLIER 2
+#define MIN_DYNAMIC_SOUND_THRESHOLD 2500
+#define MAX_RECORDING_DURATION 2000
+#define MAX_SILENCE_DURATION 1000
 
-// To turn functionality on/off via button
-bool isDisabled = false;
+bool isPaused = true;
 
 uint8_t microphonedata0[1024 * 80];
 int data_offset = 0;
 
+// Recording control variables
 bool isListening = false;
 bool isRecording = false;
 unsigned long recordStartTime = 0;
 unsigned long elapsedRecordTime = 0;
-unsigned long maxRecordingDuration = 2000;
 
-int soundThreshold = 2500;
+// Silence control variables
 unsigned long silenceStartTime = 0;
 unsigned long elapsedSilenceTime = 0;
-unsigned long maxSilenceDuration = 1000;
 
+// Sound level calibration variables
+bool isSoundLevelCalibrated = false;
+int averageSoundLevelData = 0;
+int averageSoundLevelCount = 0;
+int dynamicSoundThreshold = 0;
 
+// Playback control variables
 bool isPlaying = false;
 unsigned long playbackStartTime = 0;
 unsigned long elapsedPlaybackTime = 0;
 
-void InitI2SSpeakerOrMic(int mode)
-{
+
+void InitI2SSpeakerOrMic(int mode) {
     esp_err_t err = ESP_OK;
 
     //Serial.print("Uninstalling the I2S driver, on port: ");
@@ -78,42 +88,32 @@ void InitI2SSpeakerOrMic(int mode)
     tx_pin_config.data_in_num = CONFIG_I2S_DATA_IN_PIN;
     tx_pin_config.mck_io_num = GPIO_NUM_0; // Master clock (MCK) GPIO, set to GPIO_NUM_0
 
-    //Serial.print("Setting pin configuration for I2S, port: ");
-    //Serial.println(I2S_NUMBER);
     err += i2s_set_pin(I2S_NUMBER, &tx_pin_config);
-
-    //Serial.print("Setting clock configuration for I2S, port: ");
-    //Serial.println(I2S_NUMBER);
     err += i2s_set_clk(I2S_NUMBER, 16000, I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_MONO);
 }
 
-void startListening()
-{
-    if(isPlaying) {
-      throw std::runtime_error("Tried to listen while playing!");
-    }
-
-    Serial.println("Listening started");
+void startListening() {
+    Serial.println("- Listening started -");
     isListening = true;
+    isRecording = false;
+    isPlaying = false;
     data_offset = 0;
 
     InitI2SSpeakerOrMic(MODE_MIC);
 }
 
-void startRecording()
-{
+void startRecording() {
     if(!isListening) {
       throw std::runtime_error("Tried to record when not listening!");
     }
 
-    Serial.println("Recording started");
+    Serial.println("- Recording started -");
     isRecording = true;
     elapsedRecordTime = 0;
     recordStartTime = millis();
 }
 
-void stopListeningAndRecordingAndStartPlayback()
-{
+void stopListeningAndRecordingAndStartPlayback() {
     Serial.print("Recording stopped, ms:");
     Serial.println(elapsedRecordTime);
     isListening = false;
@@ -121,7 +121,7 @@ void stopListeningAndRecordingAndStartPlayback()
 
     InitI2SSpeakerOrMic(MODE_SPK);
 
-    Serial.println("Playback started");
+    Serial.println("- Playback started -");
     isPlaying = true;
 
     elapsedPlaybackTime = 0;
@@ -131,25 +131,59 @@ void stopListeningAndRecordingAndStartPlayback()
     i2s_write(I2S_NUMBER, microphonedata0, data_offset, &bytes_written, portMAX_DELAY);
 }
 
-void stopPlayback()
-{
+void stopPlayback() {
     Serial.print("Playback stopped, ms: ");
     Serial.println(elapsedPlaybackTime);
     isPlaying = false;
 }
 
-bool wasAboveSoundThreshold(int16_t *adcBuffer){
+void collectSoundLevelCalibrationData(int16_t *adcBuffer) {
   int soundLevel;
-  int startPoint = 10; //Skip the first x samples because of noise.
+  int startPoint = 10; // Skip the first x samples because of mysterious noise.
+  
+  // Reset sound threshold calibration data
+  isSoundLevelCalibrated = false;
+  averageSoundLevelData = 0;
+  averageSoundLevelCount = 0;
+
+  for (int n = startPoint; n < DATA_SIZE / sizeof(int16_t); n++) {
+    soundLevel = adcBuffer[n] * GAIN_FACTOR;
+    averageSoundLevelData += soundLevel;
+    averageSoundLevelCount++;
+  }
+}
+
+void setSoundLevelBasedOnCalibrationData() {
+  if(isSoundLevelCalibrated) {
+    return;
+  }
+
+  isSoundLevelCalibrated = true;
+  int averageSoundLevel = averageSoundLevelData / averageSoundLevelCount;
+  dynamicSoundThreshold = DYNAMIC_SOUND_THRESHOLD_MULTIPLIER * averageSoundLevel;
+
+  if(dynamicSoundThreshold < MIN_DYNAMIC_SOUND_THRESHOLD) {
+    dynamicSoundThreshold = MIN_DYNAMIC_SOUND_THRESHOLD;
+  }
+
+  Serial.print("Average Sound Level: ");
+  Serial.println(averageSoundLevel);
+  Serial.print("Dynamic Threshold: ");
+  Serial.println(dynamicSoundThreshold);
+}
+
+bool wasAboveSoundThreshold(int16_t *adcBuffer) {
+  int soundLevel;
+  int startPoint = 5; //Skip the first x samples because of mysterious noise.
   int numPoints = DATA_SIZE / sizeof(int16_t);
   int soundsAboveThreshold[numPoints];
   int count = 0;
 
 
-  for (int n = startPoint; n < DATA_SIZE / sizeof(int16_t); n++) {
+  for (int n = startPoint; n < numPoints; n++) {
     soundLevel = adcBuffer[n] * GAIN_FACTOR;
 
-    if (soundLevel > soundThreshold) {
+    if (soundLevel > dynamicSoundThreshold) {
       Serial.print("Sound level: ");
       Serial.println(soundLevel);
       soundsAboveThreshold[count++] = soundLevel;
@@ -157,16 +191,16 @@ bool wasAboveSoundThreshold(int16_t *adcBuffer){
   }
 
   if (count > 5) {
-    Serial.println("More than 5 elements passed the threshold.");
+    Serial.println("- Above sound threshold -");
   }
 
   return count > 5;
 }
 
-void resetRecordingAndPlaybackState() {
-  isListening = false;
-  isRecording = false;
-  isPlaying = false;
+void showPausedMessage() {
+  Serial.println(" - - - - Paused - - - - -");
+  Serial.println(" - - ( calibrating ) - - ");
+  Serial.println("- Press button to start -");
 }
 
 void setup() {
@@ -174,32 +208,18 @@ void setup() {
     Serial.begin(115200);
     M5.dis.drawpix(0, CRGB(128, 128, 0));
     delay(2000);
+    startListening();
+
+    if(isPaused) {
+      showPausedMessage();
+    }
 }
 
 void loop() {
     M5.update();
 
-    if (M5.Btn.wasPressed()) {
-      if(isDisabled) {
-        resetRecordingAndPlaybackState();
-      } else {
-        Serial.println("- - - Paused - - -");
-      }
-      isDisabled = !isDisabled;
-    }
-
-    if (isDisabled) {
-      return;
-    }
-
-    if (!isListening && !isRecording && !isPlaying)
-    {
-        startListening();
-    }
-
-    // Listening-mode (both with and without recording)
-    if (isListening)
-    {
+    // Listening-mode
+    if (isListening) {
         // Where to store microphone input from this iteration.
         // The offset points to exactly where in the array the storing should start for this iteration.
         uint8_t *buffer = microphonedata0 + data_offset;
@@ -216,6 +236,23 @@ void loop() {
         // Interpret buffer as 16-bit signed integers for easier processing
         int16_t *adcBuffer = (int16_t*)buffer;
 
+        if (M5.Btn.wasPressed()) {
+          isPaused = !isPaused;
+
+          if(isPaused) {
+            showPausedMessage();
+          } else {
+            data_offset = 0;
+          }
+        }
+
+        if(isPaused) {
+          collectSoundLevelCalibrationData(adcBuffer);
+          return;
+        } else {
+          setSoundLevelBasedOnCalibrationData();
+        }
+
         bool wasSoundDetected = wasAboveSoundThreshold(adcBuffer);
 
         // Decide if recording-mode should be triggered
@@ -227,13 +264,13 @@ void loop() {
           }
         }
 
-        // Move the offset, so that the stored microphone data is kept, and doesn't get overwritten.
+        // Move the offset, so that the stored microphone data is kept, and doesn't get overwritten
         if(isRecording)
         {
           data_offset += bytes_read;
           elapsedRecordTime += elapsedRecordTimeLocal;
 
-          // Check for silence, or update silence duration, if no sound was detected.
+          // Check for silence, or update silence duration, if no sound was detected
           if(wasSoundDetected) {
             silenceStartTime = 0;
             elapsedSilenceTime = 0;
@@ -249,21 +286,22 @@ void loop() {
           }
 
           // Check end of recording duration or end of silence duration
-          if ((elapsedRecordTime > maxRecordingDuration) || elapsedSilenceTime > maxSilenceDuration)
+          if ((elapsedRecordTime > MAX_RECORDING_DURATION) || elapsedSilenceTime > MAX_SILENCE_DURATION)
           {
               stopListeningAndRecordingAndStartPlayback();
           }
         }
     }
 
-    // Play recorded data.
+    // Play recorded data
     if(isPlaying) {
       elapsedPlaybackTime = millis() - playbackStartTime;
 
-      // Stop playback after passing record time duration.
+      // Stop playback after passing record time duration
       if (elapsedPlaybackTime >= elapsedRecordTime)
       {
           stopPlayback();
+          startListening();
       }
     }
 }

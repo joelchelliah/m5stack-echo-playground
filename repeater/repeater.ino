@@ -1,6 +1,9 @@
 #include <driver/i2s.h>
 #include <M5Atom.h>
 
+#include "voice_box.h"
+#include "printer.h"
+
 #define CONFIG_I2S_BCK_PIN 19
 #define CONFIG_I2S_LRCK_PIN 33
 #define CONFIG_I2S_DATA_PIN 22
@@ -13,11 +16,11 @@
 
 // Sound recording, analysis and calibration
 #define DATA_SIZE 1024
-#define GAIN_FACTOR 1
-#define DYNAMIC_SOUND_THRESHOLD_MULTIPLIER 2
-#define MIN_DYNAMIC_SOUND_THRESHOLD 2500
 #define MAX_RECORDING_DURATION 2000
 #define MAX_SILENCE_DURATION 1000
+
+Printer printer(Serial);
+VoiceBox voiceBox(DATA_SIZE, printer);
 
 bool isPaused = true;
 
@@ -34,12 +37,6 @@ unsigned long elapsedRecordTime = 0;
 unsigned long silenceStartTime = 0;
 unsigned long elapsedSilenceTime = 0;
 
-// Sound level calibration variables
-bool isSoundLevelCalibrated = false;
-int averageSoundLevelData = 0;
-int averageSoundLevelCount = 0;
-int dynamicSoundThreshold = 0;
-
 // Playback control variables
 bool isPlaying = false;
 unsigned long playbackStartTime = 0;
@@ -49,8 +46,6 @@ unsigned long elapsedPlaybackTime = 0;
 void InitI2SSpeakerOrMic(int mode) {
     esp_err_t err = ESP_OK;
 
-    //Serial.print("Uninstalling the I2S driver, on port: ");
-    //Serial.println(I2S_NUMBER);
     i2s_driver_uninstall(I2S_NUMBER);
 
     // Initialize the I2S configuration structure
@@ -93,7 +88,7 @@ void InitI2SSpeakerOrMic(int mode) {
 }
 
 void startListening() {
-    Serial.println("- Listening started -");
+    printer.msg("- Listening started -");
     isListening = true;
     isRecording = false;
     isPlaying = false;
@@ -107,21 +102,20 @@ void startRecording() {
       throw std::runtime_error("Tried to record when not listening!");
     }
 
-    Serial.println("- Recording started -");
+    printer.msg("- Recording started -");
     isRecording = true;
     elapsedRecordTime = 0;
     recordStartTime = millis();
 }
 
 void stopListeningAndRecordingAndStartPlayback() {
-    Serial.print("Recording stopped, ms:");
-    Serial.println(elapsedRecordTime);
+    printer.keyVal("Recording stopped, ms", elapsedRecordTime);
     isListening = false;
     isRecording = false;
 
     InitI2SSpeakerOrMic(MODE_SPK);
 
-    Serial.println("- Playback started -");
+    printer.msg("- Playback started -");
     isPlaying = true;
 
     elapsedPlaybackTime = 0;
@@ -132,75 +126,14 @@ void stopListeningAndRecordingAndStartPlayback() {
 }
 
 void stopPlayback() {
-    Serial.print("Playback stopped, ms: ");
-    Serial.println(elapsedPlaybackTime);
+    printer.keyVal()("Playback stopped, ms", elapsedPlaybackTime);
     isPlaying = false;
 }
 
-void collectSoundLevelCalibrationData(int16_t *adcBuffer) {
-  int soundLevel;
-  int startPoint = 10; // Skip the first x samples because of mysterious noise.
-  
-  // Reset sound threshold calibration data
-  isSoundLevelCalibrated = false;
-  averageSoundLevelData = 0;
-  averageSoundLevelCount = 0;
-
-  for (int n = startPoint; n < DATA_SIZE / sizeof(int16_t); n++) {
-    soundLevel = adcBuffer[n] * GAIN_FACTOR;
-    averageSoundLevelData += soundLevel;
-    averageSoundLevelCount++;
-  }
-}
-
-void setSoundLevelBasedOnCalibrationData() {
-  if(isSoundLevelCalibrated) {
-    return;
-  }
-
-  isSoundLevelCalibrated = true;
-  int averageSoundLevel = averageSoundLevelData / averageSoundLevelCount;
-  dynamicSoundThreshold = DYNAMIC_SOUND_THRESHOLD_MULTIPLIER * averageSoundLevel;
-
-  if(dynamicSoundThreshold < MIN_DYNAMIC_SOUND_THRESHOLD) {
-    dynamicSoundThreshold = MIN_DYNAMIC_SOUND_THRESHOLD;
-  }
-
-  Serial.print("Average Sound Level: ");
-  Serial.println(averageSoundLevel);
-  Serial.print("Dynamic Threshold: ");
-  Serial.println(dynamicSoundThreshold);
-}
-
-bool wasAboveSoundThreshold(int16_t *adcBuffer) {
-  int soundLevel;
-  int startPoint = 5; //Skip the first x samples because of mysterious noise.
-  int numPoints = DATA_SIZE / sizeof(int16_t);
-  int soundsAboveThreshold[numPoints];
-  int count = 0;
-
-
-  for (int n = startPoint; n < numPoints; n++) {
-    soundLevel = adcBuffer[n] * GAIN_FACTOR;
-
-    if (soundLevel > dynamicSoundThreshold) {
-      Serial.print("Sound level: ");
-      Serial.println(soundLevel);
-      soundsAboveThreshold[count++] = soundLevel;
-    }
-  }
-
-  if (count > 5) {
-    Serial.println("- Above sound threshold -");
-  }
-
-  return count > 5;
-}
-
 void showPausedMessage() {
-  Serial.println(" - - - - Paused - - - - -");
-  Serial.println(" - - ( calibrating ) - - ");
-  Serial.println("- Press button to start -");
+  printer.msg(" - - - - Paused - - - - -");
+  printer.msg(" - - ( calibrating ) - - ");
+  printer.msg("- Press button to start -");
 }
 
 void setup() {
@@ -247,20 +180,20 @@ void loop() {
         }
 
         if(isPaused) {
-          collectSoundLevelCalibrationData(adcBuffer);
+          voiceBox.collectSoundLevelCalibrationData(adcBuffer);
           return;
         } else {
-          setSoundLevelBasedOnCalibrationData();
+          voiceBox.setSoundLevelBasedOnCalibrationData();
         }
 
-        bool wasSoundDetected = wasAboveSoundThreshold(adcBuffer);
+        bool wasSoundDetected = voiceBox.wasSoundAboveSoundThreshold(adcBuffer);
 
         // Decide if recording-mode should be triggered
         if(!isRecording) {
           if (wasSoundDetected) {
             startRecording();
           } else {
-            Serial.println("Still listening...");
+            printer.msg("Still listening...");
           }
         }
 
@@ -275,8 +208,7 @@ void loop() {
             silenceStartTime = 0;
             elapsedSilenceTime = 0;
           } else {
-            Serial.print("Silence, ms: ");
-            Serial.println(elapsedSilenceTime);
+            printer.keyVal("Silence, ms", elapsedSilenceTime);
 
             if(silenceStartTime == 0) {
               silenceStartTime = millis();

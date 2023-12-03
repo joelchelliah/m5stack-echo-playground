@@ -19,6 +19,8 @@ public:
 
 private:
   HardwareSerial& serial;
+
+  bool isDisabled;
 };
 
 #endif

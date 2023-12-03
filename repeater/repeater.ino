@@ -1,18 +1,10 @@
 #include <driver/i2s.h>
 #include <M5Atom.h>
 
-#include "voice_box.h"
 #include "printer.h"
+#include "i2s_config.h"
+#include "voice_box.h"
 
-#define CONFIG_I2S_BCK_PIN 19
-#define CONFIG_I2S_LRCK_PIN 33
-#define CONFIG_I2S_DATA_PIN 22
-#define CONFIG_I2S_DATA_IN_PIN 23
-
-#define I2S_NUMBER I2S_NUM_0
-
-#define MODE_MIC 0
-#define MODE_SPK 1
 
 // Sound recording, analysis and calibration
 #define DATA_SIZE 1024
@@ -20,6 +12,7 @@
 #define MAX_SILENCE_DURATION 1000
 
 Printer printer(Serial);
+I2sConfig i2sConfig(printer);
 VoiceBox voiceBox(DATA_SIZE, printer);
 
 bool isPaused = true;
@@ -42,51 +35,6 @@ bool isPlaying = false;
 unsigned long playbackStartTime = 0;
 unsigned long elapsedPlaybackTime = 0;
 
-
-void InitI2SSpeakerOrMic(int mode) {
-    esp_err_t err = ESP_OK;
-
-    i2s_driver_uninstall(I2S_NUMBER);
-
-    // Initialize the I2S configuration structure
-    i2s_config_t i2s_config = {
-        .mode = (i2s_mode_t)(I2S_MODE_MASTER),
-        .sample_rate = 16000,
-        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT, // is fixed at 12bit, stereo, MSB
-        .channel_format = I2S_CHANNEL_FMT_ALL_RIGHT,
-        .communication_format = I2S_COMM_FORMAT_I2S,
-        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count = 6,
-        .dma_buf_len = 60,
-    };
-
-    if (mode == MODE_MIC)
-    {
-        i2s_config.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_PDM);
-    }
-    else
-    {
-        i2s_config.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
-        i2s_config.use_apll = false;
-        i2s_config.tx_desc_auto_clear = true;
-    }
-
-    // Install the I2S driver with the specified configuration
-    err += i2s_driver_install(I2S_NUMBER, &i2s_config, 0, NULL);
-
-    // Configure pin assignments for I2S
-    i2s_pin_config_t tx_pin_config;
-
-    tx_pin_config.bck_io_num = CONFIG_I2S_BCK_PIN;
-    tx_pin_config.ws_io_num = CONFIG_I2S_LRCK_PIN;
-    tx_pin_config.data_out_num = CONFIG_I2S_DATA_PIN;
-    tx_pin_config.data_in_num = CONFIG_I2S_DATA_IN_PIN;
-    tx_pin_config.mck_io_num = GPIO_NUM_0; // Master clock (MCK) GPIO, set to GPIO_NUM_0
-
-    err += i2s_set_pin(I2S_NUMBER, &tx_pin_config);
-    err += i2s_set_clk(I2S_NUMBER, 16000, I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_MONO);
-}
-
 void startListening() {
     printer.msg("- Listening started -");
     isListening = true;
@@ -94,7 +42,7 @@ void startListening() {
     isPlaying = false;
     data_offset = 0;
 
-    InitI2SSpeakerOrMic(MODE_MIC);
+    i2sConfig.micMode();
 }
 
 void startRecording() {
@@ -113,7 +61,7 @@ void stopListeningAndRecordingAndStartPlayback() {
     isListening = false;
     isRecording = false;
 
-    InitI2SSpeakerOrMic(MODE_SPK);
+    i2sConfig.speakerMode();
 
     printer.msg("- Playback started -");
     isPlaying = true;
@@ -126,7 +74,7 @@ void stopListeningAndRecordingAndStartPlayback() {
 }
 
 void stopPlayback() {
-    printer.keyVal()("Playback stopped, ms", elapsedPlaybackTime);
+    printer.keyVal("Playback stopped, ms", elapsedPlaybackTime);
     isPlaying = false;
 }
 
